@@ -4,8 +4,28 @@ format: pdf
 editor: visual
 ---
 
-```{r}
 
+```{r}
+library(dplyr)
+
+#load both datasets
+college_sc <- read.csv('/Users/dornaabdi/Dropbox/Mac/Desktop/educ423b/social_capital_college.csv')
+college_mobility <- read.csv('/Users/dornaabdi/Dropbox/Mac/Desktop/educ423b/mrc_table1.csv')
+
+#make college code identical/rename columns/align column class
+college_code <- str_sub(college_sc$college, 1, str_length(college_sc$college)-2)
+college_sc$college_code <- college_code
+colnames(college_mobility)[1] = "college_code"
+college_mobility$college_code <- as.character(college_mobility$college_code)
+
+
+#join two data sets
+college_mob_sc <- college_sc |>
+  full_join(college_mobility, by="college_code")
+
+#reorder columns
+college_mob_sc <- college_mob_sc |>
+  relocate(college_code) 
 ```
 
 You can add options to executable code like this
