@@ -4,15 +4,18 @@ format: pdf
 editor: visual
 ---
 
-
 ```{r}
 library(dplyr)
 library(stringr)
-
+library(reshape2)
+library(viridis)
+library(mgcv)
+library(tidymodels)
+library(stacks)
 
 #load both datasets
-college_sc <- read.csv('/Users/dornaabdi/Dropbox/Mac/Desktop/educ423b/social_capital_college.csv')
-college_mobility <- read.csv('/Users/dornaabdi/Dropbox/Mac/Desktop/educ423b/mrc_table1.csv')
+college_sc <- read.csv("/Data/social_capital_college.csv")
+college_mobility <- read.csv("/mrc_table1.csv")
 
 #make college code identical/rename columns/align column class
 college_code <- str_sub(college_sc$college, 1, str_length(college_sc$college)-2)
@@ -30,11 +33,285 @@ college_mob_sc <- college_mob_sc |>
   relocate(college_code) 
 ```
 
-You can add options to executable code like this
+## Correlation Matrix Heatmap (Predictors Only)
 
 ```{r}
-#| echo: false
-2 * 2
+d_cor <- college_mob_sc |> 
+  select(ec_own_ses_college, ec_high_own_ses_college, exposure_own_ses_college, bias_own_ses_college, bias_high_own_ses_college, clustering_college, support_ratio_college, volunteering_rate_college, mr_kq5_pq1) |> 
+    #college_mob_sc, -c(college_code, zip, college, county, college_name, name, czname, state)) |> 
+  na.omit() |> 
+  mutate(across(everything(), ~as.numeric(.)))
+cor(d_cor)
+
+cormat <- cor(d_cor)
+
+long_cormat <- cormat |> 
+  as.data.frame() |> 
+  mutate(var1 = rownames(cormat)) |> 
+  pivot_longer(-var1, names_to = 'var2', values_to = 'r')
+
+ggplot(data = long_cormat, aes(x=var1, y=var2, fill=r)) + 
+  geom_tile()
+ get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+  
+upper_tri <- get_upper_tri(cormat)
+upper_tri
+
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+
+
+cormat <- reorder_cormat(cormat)
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+library(reshape2)
+library(viridis)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Create a ggheatmap
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+  scale_fill_viridis(option = "B", discrete = FALSE)+
+  theme_minimal()+ # minimal theme
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()+
+  labs(x = 'Variable 2', y = 'Variable 1', title = 'Correlation Matrix Heatmap')
+ 
+# Print the heatmap
+print(ggheatmap)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+## Correlation Matrix Heatmap (All Vars)
+
+```{r}
+d_cor <- college_mob_sc |> 
+  select(-c(college_code, zip, college, county, college_name, name, czname, state))|>
+  na.omit() |> 
+  mutate(across(everything(), ~as.numeric(.)))
+cor(d_cor)
+
+cormat <- cor(d_cor)
+
+long_cormat <- cormat |> 
+  as.data.frame() |> 
+  mutate(var1 = rownames(cormat)) |> 
+  pivot_longer(-var1, names_to = 'var2', values_to = 'r')
+
+ggplot(data = long_cormat, aes(x=var1, y=var2, fill=r)) + 
+  geom_tile()
+ get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+  
+upper_tri <- get_upper_tri(cormat)
+upper_tri
+
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+
+
+cormat <- reorder_cormat(cormat)
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+library(reshape2)
+library(viridis)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Create a ggheatmap
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+  scale_fill_viridis(option = "B", discrete = FALSE)+
+  theme_minimal()+ # minimal theme
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()+
+  labs(x = 'Variable 2', y = 'Variable 1', title = 'Correlation Matrix Heatmap')
+ 
+# Print the heatmap
+print(ggheatmap)
+```
+
+## Split Data
+
+```{r pressure, echo=FALSE}
+set.seed(31337)
+
+
+d_split <- college_mob_sc |> 
+  na.omit() |> 
+  #puts 80% of data in training set
+  initial_split(prop=0.8)
+
+dim(training(d_split))
+dim(testing(d_split))
+
+
+d_folds <- vfold_cv(training(d_split), v=10)
+d_folds
+
+```
+
+## GAM Workflow
+
+```{r}
+
+
+gam_spec <- gen_additive_mod(adjust_deg_free = tune()) |> 
+  set_engine("mgcv") |> 
+             #, path_values = penalty_grid) |> 
+  set_mode("regression")
+
+all_vars <- names(college_mob_sc)
+exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1")
+
+predictor_vars <- all_vars[!(all_vars %in% exclude_vars)]
+
+gam_workflow <- workflow() |> 
+  add_variables(outcomes = c(mr_kq5_pq1), 
+                predictors = predictor_vars) |> 
+  add_model(gam_spec, formula = mr_kq5_pq1 ~ s(ec_own_ses_college) + s(ec_high_own_ses_college)+s(exposure_own_ses_college)+s(bias_own_ses_college)+s(bias_high_own_ses_college)+s(clustering_college)+s(support_ratio_college)+ s(volunteering_rate_college))
+```
+
+## Tune & Fit GAM
+
+```{r}
+tuned_GAM <- gam_workflow |> 
+  tune_grid(d_folds,
+            grid=20,
+            metrics = NULL) #metric_set(rmse)
+
+#gam_fit <- last_fit(tuned_GAM, data = d)
+best_rmse <- select_best(tuned_GAM, metric='rmse')
+
+final_gam <- gam_workflow |> 
+  finalize_workflow(best_rmse)
+final_gam
+
+
+gam_fit_test <- last_fit(final_gam, d_split)
+gam_fit_test$.metrics
+```
+
+#this is really bad
+
+## Create Model Specs for Models to be included in Ensemble
+
+```{r}
+elastic_net <- linear_reg(penalty=tune(), 
+                          mixture=tune()) |> 
+  set_engine('glmnet')
+
+knn_reg <- nearest_neighbor(neighbors=tune()) |> 
+  set_mode('regression') |> 
+  set_engine('kknn')
+
+lasso_model <- linear_reg(penalty=tune(), 
+                          mixture=1) |> 
+  set_engine('glmnet')
+
+```
+
+```{r}
+d_recipe <- recipe(mr_kq5_pq1 ~ . , data=training(d_split)) |> 
+  step_rm(college_code, zip, college, county, college_name, name, czname, state) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_dummy(all_nominal_predictors())
+```
+
+## Ensemble Workflow
+
+```{r}
+wf_set <- workflow_set(
+  preproc = list(d_recipe),
+  models = list(elastic_net=elastic_net, 
+                knn=knn_reg, 
+                lasso=lasso_model)
+)
+
+wf_set
+```
+
+```{r}
+
+gam_wf_set <- as_workflow_set(gam = gam_workflow)
+wf_set2 <- bind_rows(wf_set, gam_wf_set)
+wf_set2
+#this didn't work (couldn't add gam)
+#for now i use original wf_set but feel free to try with wf_set2 if it works for you
+```
+
+```{r}
+grid_ctrl <- control_grid(save_pred = TRUE,
+                          parallel_over = "everything",
+                          save_workflow = TRUE)
+
+grid_results <- wf_set |> 
+   workflow_map(seed = 1337,
+      resamples = d_folds,
+      grid = 20,
+      control = grid_ctrl)
+
+grid_results
+```
+
+```{r}
+autoplot(grid_results, 
+         rank_metric = "rmse", 
+         metric = "rmse") +
+  theme_bw()+
+  scale_color_brewer(palette = "Paired")
+```
+
+```{r}
+pisa_stack <- stacks() |> 
+  add_candidates(grid_results)
+
+
+meta_m <- blend_predictions(pisa_stack, penalty=10^seq(-6, 0, length.out=10), mixture = 1)
+
+autoplot(meta_m)
+```
+
+```{r}
+
+autoplot(meta_m, "weights") +
+  geom_text(aes(x = weight + 0.01, label = model), hjust = 0) + 
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = 'Paired') +
+  lims(x = c(-0.01, 0.8)) +
+  theme_bw()+
+  labs(title = paste("Model Weights in Metamodel\npenalty =", meta_m$penalty))
+```
+
+```{r}
+ensemble <- fit_members(meta_m)
+
+reg_metrics <- metric_set(rmse, rsq)
+
+#bind predictions from ensemble to test data outcome 
+ensemble_test_pred <- predict(ensemble, new_data=testing(d_split)) |> 
+  bind_cols(testing(d_split))
+
+
+ensemble_test_pred |> 
+  reg_metrics(mr_kq5_pq1, .pred)
+#RMSE = 0.692, rsq = .700
+
+ggplot(ensemble_test_pred, aes(x=mr_kq5_pq1, y=.pred)) +
+  geom_point(color='cornflowerblue', alpha=0.9) +
+  geom_abline(aes(slope=1, intercept=0), lty=2) +
+  theme_bw()+
+  labs(x = 'Economic Mobility', y = 'Predicted Economic Mobilitiy', title = 'Actual vs Predicted Economic Mobility Across Colleges in Test Set')
+
+```
