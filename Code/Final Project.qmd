@@ -7,6 +7,8 @@ editor: visual
 
 ```{r}
 library(dplyr)
+library(stringr)
+
 
 #load both datasets
 college_sc <- read.csv('/Users/dornaabdi/Dropbox/Mac/Desktop/educ423b/social_capital_college.csv')
