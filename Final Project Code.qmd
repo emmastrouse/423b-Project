@@ -12,10 +12,11 @@ library(viridis)
 library(mgcv)
 library(tidymodels)
 library(stacks)
+library(tidyverse)
 
 #load both datasets
-college_sc <- read.csv("/Data/social_capital_college.csv")
-college_mobility <- read.csv("/mrc_table1.csv")
+college_sc <- read_csv("social_capital_college.csv")
+college_mobility <- read.csv("mrc_table1.csv")
 
 #make college code identical/rename columns/align column class
 college_code <- str_sub(college_sc$college, 1, str_length(college_sc$college)-2)
@@ -140,6 +141,31 @@ ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
  
 # Print the heatmap
 print(ggheatmap)
+```
+
+## Looks like we have some multicolinearity, how to deal?
+
+```{r}
+corr_matrix <- cor(d_cor)
+
+# Find the pairs of variables with high correlation
+high_corr <- which(abs(corr_matrix) > 0.6 & corr_matrix != 1, arr.ind = TRUE)
+
+if (length(high_corr) > 0) {
+  #cat("The following pairs of variables have high correlation (> 0.6):\n")
+  for (i in 1:nrow(high_corr)) {
+    var1 <- names(corr_matrix)[high_corr[i,1]]
+    var2 <- names(corr_matrix)[high_corr[i,2]]
+    #cat(var1, "and", var2, "\n")
+    # or
+    print(paste(var1, "and", var2))
+    #cat(paste(var1, "and", var2, "\n"))
+  }
+} else {
+  cat("No pairs of variables have high correlation (> 0.6).\n")
+}
+
+
 ```
 
 ## Split Data
