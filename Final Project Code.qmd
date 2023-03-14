@@ -200,7 +200,7 @@ gam_spec <- gen_additive_mod(adjust_deg_free = tune()) |>
   set_mode("regression")
 
 all_vars <- names(college_mob_sc)
-exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1")
+exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1", "ktop1pc_cond_parq1", "kq5_cond_parq1", "mr_ktop1_pq1", "trend_parq1", "trend_bottom40", "count", "ec_own_ses_se_college", "ec_parent_ses_se_college", "ec_high_own_ses_se_college", "ec_high_parent_ses_se_college")
 
 predictor_vars <- all_vars[!(all_vars %in% exclude_vars)]
 
@@ -254,8 +254,13 @@ random_forest <- boost_tree(mtry = tune(), trees = tune(), tree_depth = tune()) 
 ```
 
 ```{r}
-d_recipe <- recipe(mr_kq5_pq1 ~ . , data=training(d_split)) |> 
-  step_rm(college_code, zip, college, county, college_name, name, czname, state) |> 
+# 
+# formula = mr_kq5_pq1 ~ s(ec_own_ses_college) + s(ec_high_own_ses_college)+s(exposure_own_ses_college)+s(bias_own_ses_college)+s(bias_high_own_ses_college)+s(clustering_college)+s(support_ratio_college)+ s(volunteering_rate_college)
+
+exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "ktop1pc_cond_parq1", "kq5_cond_parq1", "mr_ktop1_pq1", "trend_parq1", "trend_bottom40", "count", "ec_own_ses_se_college", "ec_parent_ses_se_college", "ec_high_own_ses_se_college", "ec_high_parent_ses_se_college")
+
+d_recipe <- recipe(mr_kq5_pq1 ~ ., data=training(d_split)) |> 
+  step_rm(exclude_vars) |> 
   step_normalize(all_numeric_predictors()) |> 
   step_dummy(all_nominal_predictors())
 ```
@@ -348,47 +353,68 @@ ggplot(ensemble_test_pred, aes(x=mr_kq5_pq1, y=.pred)) +
 
 ```
 
-5.  Following what we did in lab 4.2, create plots of predicted mobility as a function of the value of predictors. In each case, be sure to use appropriate values of the variable you are investigating and hold all other variables at their mean value. Interpret each of these plots. What is the ensemble showing you about the relationships between each of these variables and happiness?
+## Investigate Relationships
+
+Following what we did in lab 4.2, create plots of predicted mobility as a function of the value of predictors. In each case, be sure to use appropriate values of the variable you are investigating and hold all other variables at their mean value. Interpret each of these plots. What is the ensemble showing you about the relationships between each of these variables and happiness?
+
+Predictors: ec_own_ses_college, ec_high_own_ses_college, exposure_own_ses_college, bias_own_ses_college, bias_high_own_ses_college, clustering_college, support_ratio_college, volunteering_rate_college
+
+outcome: mr_kq5_pq1
 
 ```{r}
-d <- d |> 
+college_mob_sc <- college_mob_sc |> 
   mutate(type = 'data')
 
-range(d$beer_per_capita)
+summary(college_mob_sc$ec_own_ses_college)
+
 #check out the distribution of beer variable to choose reasonable range
-ggplot(data = d, aes(x = beer_per_capita)) +
+ggplot(data = college_mob_sc, aes(x = ec_own_ses_college)) +
   geom_histogram()
 
+mean(college_mob_sc$ec_high_own_ses_college, na.rm = TRUE)
 
-pred_beer <- data.frame(beer_per_capita=seq(1, 376, length.out=115),
-                   population=mean(d$population),
-                   infant_mortality_per_thousand = mean(d$infant_mortality_per_thousand),
-                   wine_per_capita = mean(d$wine_per_capita),
-                   gdp = mean(d$gdp),
-                   area_sq_mi = mean(d$area_sq_mi),
-                   spirits_per_capita = mean(d$spirits_per_capita),
-                   pop_density = mean(d$pop_density),
-                   country = d$country,
-                   type='model')
+pred_ec_own <- data.frame(ec_own_ses_college=seq(0.2162, 1.9018, length.out=2933),
+                   ec_high_own_ses_college=mean(college_mob_sc$ec_high_own_ses_college, na.rm = T),
+                   ec_parent_ses_college = mean(college_mob_sc$ec_parent_ses_college, na.rm = T),
+                   ec_high_parent_ses_college = mean(college_mob_sc$ec_high_parent_ses_college, na.rm = T),
+                   exposure_own_ses_college = mean(college_mob_sc$exposure_own_ses_college, na.rm = T),
+                   exposure_parent_ses_college = mean(college_mob_sc$exposure_parent_ses_college, na.rm = T),
+                   bias_own_ses_college = mean(college_mob_sc$bias_own_ses_college, na.rm = T),
+                   bias_parent_ses_college = mean(college_mob_sc$bias_parent_ses_college, na.rm = T),
+                   bias_high_own_ses_college = mean(college_mob_sc$bias_high_own_ses_college, na.rm = T),
+                   bias_high_parent_ses_college = mean(college_mob_sc$bias_high_own_ses_college, na.rm = T),
+                   clustering_colege = mean(college_mob_sc$clustering_college, na.rm. = T),
+                   support_ratio_college = mean(college_mob_sc$support_ratio_college, na.rm = T),
+                   volunteering_college = mean(college_mob_sc$volunteering_rate_college, na.rm = T),
+                   mean_students_per_cohort = mean(college_mob_sc$mean_students_per_cohort, na.rm = T),
+                   par_median = mean(college_mob_sc$par_median, na.rm = T),
+                   k_median = mean(college_mob_sc$k_median, na.rm = T),
+                   par_q1 = mean(college_mob_sc$par_q1, na.rm = T),
+                   par_top1c = mean(college_mob_sc$par_top1c, na.rm = T),
+                   type = 'model')
 
-gam_fit <- fit(final_gam, data=d)
+# length(exclude_vars)
+# dim(college_mob_sc)
+                 
 
-pred_beer <- bind_cols(pred_beer, predict(gam_fit, new_data=pred_beer)) |> 
-  rename(happiness = .pred)
+gam_fit <- fit(final_gam, data=college_mob_sc)
+
+pred_ec_own <- bind_cols(pred_ec_own, predict(gam_fit, new_data=pred_ec_own)) |> 
+  rename(mr_kq5_pq1 = .pred)
 
 
 
-bind_rows(d, pred_beer) |> 
+bind_rows(college_mob_sc, pred_ec_own) |> 
     #filter out outliers on beer_per_capita to scale our plot reasonably
-  mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
-  filter(z_score_beer_per_capita <= 3) |>
-  ggplot(aes(x=beer_per_capita, y=happiness, size=type, color=type)) + 
+  # mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
+  # filter(z_score_beer_per_capita <= 3) |>
+  ggplot(aes(x=ec_own_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
   geom_point() + 
   scale_color_manual(values=c('data'='black', 
                               'model'='cornflowerblue')) +
   scale_size_manual(values=c('data'=2,
                              'model'=0.3)) +
-  labs(x = 'Beer Per Capita', y = 'Happiness', title = 'Beer Per Capita vs Happiness\nGAM vs Data')+
+  labs(x = 'Economic Segregation (Own)', y = 'Economic Mobility', title = 'Economic Segregation vs Mobility Rate')+
   theme_bw()
 
 ```
