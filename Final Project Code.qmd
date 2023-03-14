@@ -13,6 +13,7 @@ library(mgcv)
 library(tidymodels)
 library(stacks)
 library(tidyverse)
+library(xgboost)
 
 #load both datasets
 college_sc <- read_csv("social_capital_college.csv")
@@ -246,6 +247,10 @@ lasso_model <- linear_reg(penalty=tune(),
                           mixture=1) |> 
   set_engine('glmnet')
 
+random_forest <- boost_tree(mtry = tune(), trees = tune(), tree_depth = tune()) |> 
+  set_engine('xgboost') |> 
+  set_mode('regression')
+
 ```
 
 ```{r}
@@ -262,7 +267,8 @@ wf_set <- workflow_set(
   preproc = list(d_recipe),
   models = list(elastic_net=elastic_net, 
                 knn=knn_reg, 
-                lasso=lasso_model)
+                lasso=lasso_model,
+                forest = random_forest)
 )
 
 wf_set
@@ -339,5 +345,91 @@ ggplot(ensemble_test_pred, aes(x=mr_kq5_pq1, y=.pred)) +
   geom_abline(aes(slope=1, intercept=0), lty=2) +
   theme_bw()+
   labs(x = 'Economic Mobility', y = 'Predicted Economic Mobilitiy', title = 'Actual vs Predicted Economic Mobility Across Colleges in Test Set')
+
+```
+
+5.  Following what we did in lab 4.2, create plots of predicted mobility as a function of the value of predictors. In each case, be sure to use appropriate values of the variable you are investigating and hold all other variables at their mean value. Interpret each of these plots. What is the ensemble showing you about the relationships between each of these variables and happiness?
+
+```{r}
+d <- d |> 
+  mutate(type = 'data')
+
+range(d$beer_per_capita)
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = d, aes(x = beer_per_capita)) +
+  geom_histogram()
+
+
+pred_beer <- data.frame(beer_per_capita=seq(1, 376, length.out=115),
+                   population=mean(d$population),
+                   infant_mortality_per_thousand = mean(d$infant_mortality_per_thousand),
+                   wine_per_capita = mean(d$wine_per_capita),
+                   gdp = mean(d$gdp),
+                   area_sq_mi = mean(d$area_sq_mi),
+                   spirits_per_capita = mean(d$spirits_per_capita),
+                   pop_density = mean(d$pop_density),
+                   country = d$country,
+                   type='model')
+
+gam_fit <- fit(final_gam, data=d)
+
+pred_beer <- bind_cols(pred_beer, predict(gam_fit, new_data=pred_beer)) |> 
+  rename(happiness = .pred)
+
+
+
+bind_rows(d, pred_beer) |> 
+    #filter out outliers on beer_per_capita to scale our plot reasonably
+  mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
+  filter(z_score_beer_per_capita <= 3) |>
+  ggplot(aes(x=beer_per_capita, y=happiness, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Beer Per Capita', y = 'Happiness', title = 'Beer Per Capita vs Happiness\nGAM vs Data')+
+  theme_bw()
+
+```
+
+It appears the happiness increases moderately as beer per capita increases
+
+```{r}
+range(d$wine_per_capita)
+#check out the distribution of wine variable to choose reasonable range
+ggplot(data = d, aes(x = wine_per_capita)) +
+  geom_histogram()
+
+
+pred_wine <- data.frame(wine_per_capita=seq(1, 370, length.out=115),
+                   population=mean(d$population),
+                   infant_mortality_per_thousand = mean(d$infant_mortality_per_thousand),
+                   beer_per_capita = mean(d$wine_per_capita),
+                   gdp = mean(d$gdp),
+                   area_sq_mi = mean(d$area_sq_mi),
+                   spirits_per_capita = mean(d$spirits_per_capita),
+                   pop_density = mean(d$pop_density),
+                   type='model')
+
+
+pred_wine <- bind_cols(pred_wine, predict(gam_fit, new_data=pred_wine)) |> 
+  rename(happiness = .pred)
+
+
+bind_rows(d, pred_wine) |> 
+  #filter out outliers on wine_per_capita to scale our plot reasonably
+  mutate(z_score_wine_per_capita = scale(wine_per_capita)) |> 
+  filter(z_score_wine_per_capita <= 3) |> 
+  ggplot(aes(x=wine_per_capita, y=happiness, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Wine Per Capita', y = 'Happiness', title = 'Wine Per Capita vs Happiness\nGAM vs Data')+
+  theme_bw()+
+  #scale so we can see majority of data points
+  scale_x_continuous(limits = c(0,280))
 
 ```
