@@ -14,7 +14,7 @@ library(tidymodels)
 library(stacks)
 library(tidyverse)
 library(xgboost)
-
+library(ggpubr)
 #load both datasets
 college_sc <- read_csv("social_capital_college.csv")
 college_mobility <- read.csv("mrc_table1.csv")
@@ -32,7 +32,8 @@ college_mob_sc <- college_sc |>
 
 #reorder columns
 college_mob_sc <- college_mob_sc |>
-  relocate(college_code) 
+  relocate(college_code) |> 
+  mutate_if(is.integer, as.numeric)
 ```
 
 ## Correlation Matrix Heatmap (Predictors Only)
@@ -189,20 +190,34 @@ d_folds
 
 ```
 
-## GAM Workflow
+## Simple OLS
 
 ```{r}
 
+all_vars <- names(college_mob_sc)
+exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1", "ktop1pc_cond_parq1", "kq5_cond_parq1", "mr_ktop1_pq1", "trend_parq1", "trend_bottom40", "count", "ec_own_ses_se_college", "ec_parent_ses_se_college", "ec_high_own_ses_se_college", "ec_high_parent_ses_se_college")
+
+predictor_vars <- all_vars[!(all_vars %in% exclude_vars)]
+
+
+formula_str <- paste0("mr_kq5_pq1 ~ ", paste(predictor_vars, collapse = " + "))
+
+simple_lm <- lm(formula_str, data = college_mob_sc)
+summary(simple_lm)
+
+predictions <- predict(simple_lm, testing(d_split))
+rmse(predictions, testing(d_split)$mr_kq5_pq1)
+```
+
+## GAM Workflow
+
+```{r}
 
 gam_spec <- gen_additive_mod(adjust_deg_free = tune()) |> 
   set_engine("mgcv") |> 
              #, path_values = penalty_grid) |> 
   set_mode("regression")
 
-all_vars <- names(college_mob_sc)
-exclude_vars <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1", "ktop1pc_cond_parq1", "kq5_cond_parq1", "mr_ktop1_pq1", "trend_parq1", "trend_bottom40", "count", "ec_own_ses_se_college", "ec_parent_ses_se_college", "ec_high_own_ses_se_college", "ec_high_parent_ses_se_college")
-
-predictor_vars <- all_vars[!(all_vars %in% exclude_vars)]
 
 gam_workflow <- workflow() |> 
   add_variables(outcomes = c(mr_kq5_pq1), 
@@ -230,7 +245,9 @@ gam_fit_test <- last_fit(final_gam, d_split)
 gam_fit_test$.metrics
 ```
 
-#this is really bad
+This is really bad.
+
+Now, let's try to create an ensemble
 
 ## Create Model Specs for Models to be included in Ensemble
 
@@ -280,15 +297,6 @@ wf_set
 ```
 
 ```{r}
-
-gam_wf_set <- as_workflow_set(gam = gam_workflow)
-wf_set2 <- bind_rows(wf_set, gam_wf_set)
-wf_set2
-#this didn't work (couldn't add gam)
-#for now i use original wf_set but feel free to try with wf_set2 if it works for you
-```
-
-```{r}
 grid_ctrl <- control_grid(save_pred = TRUE,
                           parallel_over = "everything",
                           save_workflow = TRUE)
@@ -307,34 +315,43 @@ autoplot(grid_results,
          rank_metric = "rmse", 
          metric = "rmse") +
   theme_bw()+
-  scale_color_brewer(palette = "Paired")
+  scale_color_brewer(palette = "Paired")+
+  labs(title = 'RMSE Across Models in Ensemble, Ranked Best to Worst')
 ```
 
 ```{r}
 pisa_stack <- stacks() |> 
   add_candidates(grid_results)
 
+# meta_m <- blend_predictions(pisa_stack, penalty=10^seq(-6, 0, length.out=10), mixture = 1)
+# 
+# meta_m <- blend_predictions(pisa_stack, mtry=10^seq(0, 10, length.out=10), mixture = 1)
+# 
+# autoplot(meta_m)
 
-meta_m <- blend_predictions(pisa_stack, penalty=10^seq(-6, 0, length.out=10), mixture = 1)
 
+meta_m <- blend_predictions(pisa_stack)
+meta_m
 autoplot(meta_m)
 ```
 
-```{r}
+Ensemble Retained 16 out of 61 possible members, penalty = .01, mixture = 1
 
+```{r}
 autoplot(meta_m, "weights") +
   geom_text(aes(x = weight + 0.01, label = model), hjust = 0) + 
   theme(legend.position = "none") +
   scale_fill_brewer(palette = 'Paired') +
   lims(x = c(-0.01, 0.8)) +
   theme_bw()+
-  labs(title = paste("Model Weights in Metamodel\npenalty =", meta_m$penalty))
+  labs(title = paste("Model Weights in Metamodel (kNN, Elastic Net, Lasso, Forest) \npenalty =", meta_m$penalty))
 ```
 
 ```{r}
 ensemble <- fit_members(meta_m)
-
+library(yardstick)
 reg_metrics <- metric_set(rmse, rsq)
+
 
 #bind predictions from ensemble to test data outcome 
 ensemble_test_pred <- predict(ensemble, new_data=testing(d_split)) |> 
@@ -349,17 +366,19 @@ ggplot(ensemble_test_pred, aes(x=mr_kq5_pq1, y=.pred)) +
   geom_point(color='cornflowerblue', alpha=0.9) +
   geom_abline(aes(slope=1, intercept=0), lty=2) +
   theme_bw()+
-  labs(x = 'Economic Mobility', y = 'Predicted Economic Mobilitiy', title = 'Actual vs Predicted Economic Mobility Across Colleges in Test Set')
+  labs(x = 'Economic Mobility', y = 'Predicted Economic Mobilitiy', title = 'Prediction Performance: Actual vs Ensemble-Predicted Economic Mobility\nAcross Colleges in Test Set')
 
 ```
 
-## Investigate Relationships
+## Inference: Investigate Relationships
 
 Following what we did in lab 4.2, create plots of predicted mobility as a function of the value of predictors. In each case, be sure to use appropriate values of the variable you are investigating and hold all other variables at their mean value. Interpret each of these plots. What is the ensemble showing you about the relationships between each of these variables and happiness?
 
 Predictors: ec_own_ses_college, ec_high_own_ses_college, exposure_own_ses_college, bias_own_ses_college, bias_high_own_ses_college, clustering_college, support_ratio_college, volunteering_rate_college
 
 outcome: mr_kq5_pq1
+
+#### 1. Economic Connectedness
 
 ```{r}
 college_mob_sc <- college_mob_sc |> 
@@ -371,31 +390,12 @@ summary(college_mob_sc$ec_own_ses_college)
 ggplot(data = college_mob_sc, aes(x = ec_own_ses_college)) +
   geom_histogram()
 
-mean(college_mob_sc$ec_high_own_ses_college, na.rm = TRUE)
 
-pred_ec_own <- data.frame(ec_own_ses_college=seq(0.2162, 1.9018, length.out=2933),
-                   ec_high_own_ses_college=mean(college_mob_sc$ec_high_own_ses_college, na.rm = T),
-                   ec_parent_ses_college = mean(college_mob_sc$ec_parent_ses_college, na.rm = T),
-                   ec_high_parent_ses_college = mean(college_mob_sc$ec_high_parent_ses_college, na.rm = T),
-                   exposure_own_ses_college = mean(college_mob_sc$exposure_own_ses_college, na.rm = T),
-                   exposure_parent_ses_college = mean(college_mob_sc$exposure_parent_ses_college, na.rm = T),
-                   bias_own_ses_college = mean(college_mob_sc$bias_own_ses_college, na.rm = T),
-                   bias_parent_ses_college = mean(college_mob_sc$bias_parent_ses_college, na.rm = T),
-                   bias_high_own_ses_college = mean(college_mob_sc$bias_high_own_ses_college, na.rm = T),
-                   bias_high_parent_ses_college = mean(college_mob_sc$bias_high_own_ses_college, na.rm = T),
-                   clustering_colege = mean(college_mob_sc$clustering_college, na.rm. = T),
-                   support_ratio_college = mean(college_mob_sc$support_ratio_college, na.rm = T),
-                   volunteering_college = mean(college_mob_sc$volunteering_rate_college, na.rm = T),
-                   mean_students_per_cohort = mean(college_mob_sc$mean_students_per_cohort, na.rm = T),
-                   par_median = mean(college_mob_sc$par_median, na.rm = T),
-                   k_median = mean(college_mob_sc$k_median, na.rm = T),
-                   par_q1 = mean(college_mob_sc$par_q1, na.rm = T),
-                   par_top1c = mean(college_mob_sc$par_top1c, na.rm = T),
-                   type = 'model')
-
-# length(exclude_vars)
-# dim(college_mob_sc)
-                 
+pred_ec_own <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(ec_own_ses_college = seq(0.2162, 1.9018, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
 
 gam_fit <- fit(final_gam, data=college_mob_sc)
 
@@ -404,7 +404,7 @@ pred_ec_own <- bind_cols(pred_ec_own, predict(gam_fit, new_data=pred_ec_own)) |>
 
 
 
-bind_rows(college_mob_sc, pred_ec_own) |> 
+p1 <- bind_rows(college_mob_sc, pred_ec_own) |> 
     #filter out outliers on beer_per_capita to scale our plot reasonably
   # mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
   # filter(z_score_beer_per_capita <= 3) |>
@@ -414,48 +414,434 @@ bind_rows(college_mob_sc, pred_ec_own) |>
                               'model'='cornflowerblue')) +
   scale_size_manual(values=c('data'=2,
                              'model'=0.3)) +
-  labs(x = 'Economic Segregation (Own)', y = 'Economic Mobility', title = 'Economic Segregation vs Mobility Rate')+
+  labs(x = 'Economic Connectedness', y = 'Economic Mobility', title = 'Economic Connectedness vs Mobility Rate')+
   theme_bw()
 
 ```
 
-It appears the happiness increases moderately as beer per capita increases
+#### 2. Economic Connectedness (Parental)
 
 ```{r}
-range(d$wine_per_capita)
-#check out the distribution of wine variable to choose reasonable range
-ggplot(data = d, aes(x = wine_per_capita)) +
+
+
+summary(college_mob_sc$ec_parent_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = ec_parent_ses_college)) +
   geom_histogram()
 
 
-pred_wine <- data.frame(wine_per_capita=seq(1, 370, length.out=115),
-                   population=mean(d$population),
-                   infant_mortality_per_thousand = mean(d$infant_mortality_per_thousand),
-                   beer_per_capita = mean(d$wine_per_capita),
-                   gdp = mean(d$gdp),
-                   area_sq_mi = mean(d$area_sq_mi),
-                   spirits_per_capita = mean(d$spirits_per_capita),
-                   pop_density = mean(d$pop_density),
-                   type='model')
+pred_ec_parent <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(ec_parent_ses_college = seq(0.2730, 1.7315, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+gam_fit <- fit(final_gam, data=college_mob_sc)
+
+pred_ec_parent <- bind_cols(pred_ec_parent, predict(gam_fit, new_data=pred_ec_parent)) |> 
+  rename(mr_kq5_pq1 = .pred)
 
 
-pred_wine <- bind_cols(pred_wine, predict(gam_fit, new_data=pred_wine)) |> 
-  rename(happiness = .pred)
 
-
-bind_rows(d, pred_wine) |> 
-  #filter out outliers on wine_per_capita to scale our plot reasonably
-  mutate(z_score_wine_per_capita = scale(wine_per_capita)) |> 
-  filter(z_score_wine_per_capita <= 3) |> 
-  ggplot(aes(x=wine_per_capita, y=happiness, size=type, color=type)) + 
+p2 <- bind_rows(college_mob_sc, pred_ec_parent) |> 
+    #filter out outliers on beer_per_capita to scale our plot reasonably
+  # mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
+  # filter(z_score_beer_per_capita <= 3) |>
+  ggplot(aes(x=ec_parent_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
   geom_point() + 
   scale_color_manual(values=c('data'='black', 
                               'model'='cornflowerblue')) +
   scale_size_manual(values=c('data'=2,
                              'model'=0.3)) +
-  labs(x = 'Wine Per Capita', y = 'Happiness', title = 'Wine Per Capita vs Happiness\nGAM vs Data')+
-  theme_bw()+
-  #scale so we can see majority of data points
-  scale_x_continuous(limits = c(0,280))
+  labs(x = 'Parent Economic Connectedness', y = 'Economic Mobility', title = 'Economic Connectedness with Parental SES vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 3. High Economic Connectedness
+
+```{r}
+summary(college_mob_sc$ec_high_own_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = ec_high_own_ses_college)) +
+  geom_histogram()
+
+
+pred_ec_high_own <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(ec_high_own_ses_college = seq(0.3355, 1.9347, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+                 
+
+pred_ec_high_own <- bind_cols(pred_ec_high_own, predict(gam_fit, new_data=pred_ec_high_own)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p3 <- bind_rows(college_mob_sc, pred_ec_high_own) |> 
+  ggplot(aes(x=ec_high_own_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Economic Connectedness (High)', y = 'Economic Mobility', title = 'Economic Connectedness for High-SES Individuals vs Mobility Rate')+
+  theme_bw()
+
+```
+
+#### 4. High Economic Connectedness (Parental)
+
+```{r}
+summary(college_mob_sc$ec_high_parent_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = ec_high_parent_ses_college)) +
+  geom_histogram()
+
+
+pred_ec_high_parent <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(ec_high_parent_ses_college = seq(0.2793, 1.7421, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+                 
+
+pred_ec_high_parent <- bind_cols(pred_ec_high_parent, predict(gam_fit, new_data=pred_ec_high_parent)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p4 <- bind_rows(college_mob_sc, pred_ec_high_parent) |> 
+  ggplot(aes(x=ec_high_parent_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Parent Economic Connectedness (High)', y = 'Economic Mobility', title = 'Economic connectedness for high-parental-SES individuals vs Mobility Rate')+
+  theme_bw()
+
+```
+
+#### 5. Exposure
+
+```{r}
+summary(college_mob_sc$exposure_own_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = exposure_own_ses_college)) +
+  geom_histogram()
+
+
+pred_exposure_own <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(exposure_own_ses_college = seq(0.265, 1.9, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_exposure_own <- bind_cols(pred_exposure_own, predict(gam_fit, new_data=pred_exposure_own)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+p5 <- bind_rows(college_mob_sc, pred_exposure_own) |> 
+  ggplot(aes(x=exposure_own_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Exposure', y = 'Economic Mobility', title = 'Mean exposure to high-SES individuals for low-SES individuals\nvs Mobility Rate')+
+  theme_bw()
+
+```
+
+#### 6. Exposure (Parental)
+
+```{r}
+summary(college_mob_sc$exposure_parent_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = exposure_parent_ses_college)) +
+  geom_histogram()
+
+
+pred_exposure_parent <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(exposure_parent_ses_college = seq(0.2906, 1.7188, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_exposure_parent <- bind_cols(pred_exposure_parent, predict(gam_fit, new_data=pred_exposure_parent)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+p6 <- bind_rows(college_mob_sc, pred_exposure_parent) |> 
+  ggplot(aes(x=exposure_parent_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Exposure', y = 'Economic Mobility', title = 'Mean exposure to high-parental-SES individuals by college for low- parental-SES individuals\nvs Mobility Rate')+
+  theme_bw()
+```
+
+#### 7. Bias
+
+```{r}
+summary(college_mob_sc$bias_own_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = bias_own_ses_college)) +
+  geom_histogram()
+
+
+pred_bias_own <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(bias_own_ses_college = seq(-.1562, .3822, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+                 
+
+pred_bias_own <- bind_cols(pred_bias_own, predict(gam_fit, new_data=pred_bias_own)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p7 <- bind_rows(college_mob_sc, pred_bias_own) |> 
+  ggplot(aes(x=bias_own_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Friending Bias', y = 'Economic Mobility', title = 'Friending Bias vs Mobility Rate')+
+  theme_bw()
+
+```
+
+#### 8. Bias (Parental)
+
+```{r}
+summary(college_mob_sc$bias_parent_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = bias_parent_ses_college)) +
+  geom_histogram()
+
+
+pred_bias_parent <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(bias_parent_ses_college = seq(-.1650, .2440, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+                 
+
+pred_bias_parent <- bind_cols(pred_bias_parent, predict(gam_fit, new_data=pred_bias_parent)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p8 <- bind_rows(college_mob_sc, pred_bias_parent) |> 
+  ggplot(aes(x=bias_parent_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Friending Bias with Parental SES', y = 'Economic Mobility', title = 'Friending Bias using Parental SES vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 9. Bias (High)
+
+```{r}
+summary(college_mob_sc$bias_high_own_ses_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = bias_high_own_ses_college)) +
+  geom_histogram()
+
+
+pred_bias_high_own <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(bias_high_own_ses_college = seq(-.834, .0225, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_bias_high_own <- bind_cols(pred_bias_high_own, predict(gam_fit, new_data=pred_bias_high_own)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p9 <- bind_rows(college_mob_sc, pred_bias_high_own) |> 
+    #filter out outliers on beer_per_capita to scale our plot reasonably
+  # mutate(z_score_beer_per_capita = scale(beer_per_capita)) |>
+  # filter(z_score_beer_per_capita <= 3) |>
+  ggplot(aes(x=bias_high_own_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Friending Bias (High)', y = 'Economic Mobility', title = 'Friending Bias for High-SES Individuals vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 10. Bias (Parental; High)
+
+```{r}
+summary(college_mob_sc$bias_high_parent_ses_college)
+
+# ggplot(data = college_mob_sc, aes(x = bias_high_parent_ses_college)) +
+#   geom_histogram()
+
+
+pred_bias_high_parent <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(bias_high_parent_ses_college = seq(-.3357, .0973, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_bias_high_parent <- bind_cols(pred_bias_high_parent, predict(gam_fit, new_data=pred_bias_high_parent)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p10 <- bind_rows(college_mob_sc, pred_bias_high_parent) |> 
+  ggplot(aes(x=bias_high_parent_ses_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Friending Bias (High Parental SES)', y = 'Economic Mobility', title = 'Friending Bias for High-Parental-SES Individuals vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 11. Clustering
+
+```{r}
+summary(college_mob_sc$clustering_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = clustering_college)) +
+  geom_histogram()
+
+
+pred_clustering <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(clustering_college = seq(.0989, .8225, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_clustering <- bind_cols(pred_clustering, predict(gam_fit, new_data=pred_clustering)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p11 <- bind_rows(college_mob_sc, pred_clustering) |> 
+  ggplot(aes(x=clustering_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Clustering', y = 'Economic Mobility', title = 'Clustering vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 12. Support Ratio
+
+```{r}
+summary(college_mob_sc$support_ratio_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = support_ratio_college)) +
+  geom_histogram()
+
+
+pred_support_ratio <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(support_ratio_college = seq(.5166, 1.0, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_support_ratio <- bind_cols(pred_support_ratio, predict(gam_fit, new_data=pred_support_ratio)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p12 <- bind_rows(college_mob_sc, pred_support_ratio) |> 
+  ggplot(aes(x=support_ratio_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Economic Segregation (Own)', y = 'Economic Mobility', title = 'Support Ratio vs Mobility Rate')+
+  theme_bw()
+```
+
+#### 13. Volunteering Rate
+
+```{r}
+summary(college_mob_sc$volunteering_rate_college)
+
+#check out the distribution of beer variable to choose reasonable range
+ggplot(data = college_mob_sc, aes(x = volunteering_rate_college)) +
+  geom_histogram()
+
+
+pred_volunteering_rate <- college_mob_sc |> 
+  mutate(across(where(is.numeric), ~ mean(., na.rm = TRUE))) |> 
+  mutate(volunteering_rate_college = seq(.0014, .3471, length.out=2933)) |> 
+  select(-mr_kq5_pq1) |> 
+  mutate(type = 'model')
+
+
+pred_volunteering_rate <- bind_cols(pred_volunteering_rate, predict(gam_fit, new_data=pred_volunteering_rate)) |> 
+  rename(mr_kq5_pq1 = .pred)
+
+
+
+p13 <- bind_rows(college_mob_sc, pred_volunteering_rate) |> 
+  ggplot(aes(x=volunteering_rate_college, y=mr_kq5_pq1, size=type, color=type)) + 
+  geom_point() + 
+  scale_color_manual(values=c('data'='black', 
+                              'model'='cornflowerblue')) +
+  scale_size_manual(values=c('data'=2,
+                             'model'=0.3)) +
+  labs(x = 'Volunteering Rate', y = 'Economic Mobility', title = 'Volunteering Rate vs Mobility Rate')+
+  theme_bw()
+```
+
+Print out plots here to save:
+
+```{r}
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+p9
+p10
+p11
+p12
+p13
 
 ```
