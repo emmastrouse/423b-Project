@@ -6,6 +6,7 @@ editor: visual
 
 ```{r}
 library(dplyr)
+library(sjPlot)
 library(stringr)
 library(reshape2)
 library(viridis)
@@ -15,6 +16,11 @@ library(stacks)
 library(tidyverse)
 library(xgboost)
 library(ggpubr)
+library(pcr)
+library(factoextra)
+library(pls)
+library(yardstick)
+
 #load both datasets
 college_sc <- read_csv("social_capital_college.csv")
 college_mobility <- read.csv("mrc_table1.csv")
@@ -34,6 +40,19 @@ college_mob_sc <- college_sc |>
 college_mob_sc <- college_mob_sc |>
   relocate(college_code) |> 
   mutate_if(is.integer, as.numeric)
+```
+
+# Descriptive Statistics
+
+```{r}
+library(stargazer)
+descriptive_stats <- college_mob_sc |> 
+  select(par_median, k_median, par_q1, par_top1pc, mr_kq5_pq1, ec_own_ses_college, ec_parent_ses_college, ec_high_own_ses_college, ec_high_parent_ses_college, exposure_own_ses_college, exposure_parent_ses_college, bias_own_ses_college, bias_parent_ses_college, bias_high_own_ses_college, bias_high_parent_ses_college, clustering_college, support_ratio_college, volunteering_rate_college) 
+
+# Create the descriptive statistics table
+stargazer(as.data.frame(descriptive_stats), type = "text", out = "summarystats.html", title = "Table 1. Descriptive Statistics")
+
+
 ```
 
 ## Correlation Matrix Heatmap (Predictors Only)
@@ -145,30 +164,7 @@ ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
 print(ggheatmap)
 ```
 
-## Looks like we have some multicolinearity, how to deal?
-
-```{r}
-corr_matrix <- cor(d_cor)
-
-# Find the pairs of variables with high correlation
-high_corr <- which(abs(corr_matrix) > 0.6 & corr_matrix != 1, arr.ind = TRUE)
-
-if (length(high_corr) > 0) {
-  #cat("The following pairs of variables have high correlation (> 0.6):\n")
-  for (i in 1:nrow(high_corr)) {
-    var1 <- names(corr_matrix)[high_corr[i,1]]
-    var2 <- names(corr_matrix)[high_corr[i,2]]
-    #cat(var1, "and", var2, "\n")
-    # or
-    print(paste(var1, "and", var2))
-    #cat(paste(var1, "and", var2, "\n"))
-  }
-} else {
-  cat("No pairs of variables have high correlation (> 0.6).\n")
-}
-
-
-```
+Looks like we have some multicolinearity, how to deal?
 
 ## Split Data
 
@@ -206,7 +202,12 @@ simple_lm <- lm(formula_str, data = college_mob_sc)
 summary(simple_lm)
 
 predictions <- predict(simple_lm, testing(d_split))
-rmse(predictions, testing(d_split)$mr_kq5_pq1)
+
+#write function for rmse:
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted) ^ 2))
+}
+rmse(testing(d_split)$mr_kq5_pq1, predictions)
 ```
 
 ## GAM Workflow
@@ -349,8 +350,7 @@ autoplot(meta_m, "weights") +
 
 ```{r}
 ensemble <- fit_members(meta_m)
-library(yardstick)
-reg_metrics <- metric_set(rmse, rsq)
+reg_metrics <- metric_set(yardstick::rmse, yardstick::rsq)
 
 
 #bind predictions from ensemble to test data outcome 
@@ -370,7 +370,7 @@ ggplot(ensemble_test_pred, aes(x=mr_kq5_pq1, y=.pred)) +
 
 ```
 
-## Inference: Investigate Relationships
+## Inference: Investigate Relationships with Ensemble
 
 Following what we did in lab 4.2, create plots of predicted mobility as a function of the value of predictors. In each case, be sure to use appropriate values of the variable you are investigating and hold all other variables at their mean value. Interpret each of these plots. What is the ensemble showing you about the relationships between each of these variables and happiness?
 
@@ -844,4 +844,120 @@ p11
 p12
 p13
 
+```
+
+# PCA:
+
+try out PCA to deal with the colinearity of predictors in our simple OLS
+
+```{r}
+
+college_pca <- training(d_split) |> 
+  select(ec_own_ses_college, ec_parent_ses_college, ec_high_own_ses_college,ec_high_parent_ses_college, exposure_own_ses_college, exposure_parent_ses_college, bias_own_ses_college, bias_parent_ses_college, bias_high_own_ses_college, bias_high_parent_ses_college, clustering_college, support_ratio_college, volunteering_rate_college, mr_kq5_pq1) |> 
+  na.omit() |> 
+  mutate(across(everything(), ~as.numeric(.)))
+set.seed(100)
+pcr_college <- pcr(mr_kq5_pq1~., data = college_pca, scale = TRUE, validation = "CV")
+summary(pcr_college)
+# Plot the root mean squared error
+validationplot(pcr_college)
+# Plot the cross validation MSE
+validationplot(pcr_college, val.type="MSEP")
+# Plot the R2
+validationplot(pcr_college, val.type = "R2")
+##plot the predicted vs measured values
+predplot(pcr_college)
+#plot regression coeff
+coefplot(pcr_college)
+data_split <- initial_split(college_pca, prop = 0.8)
+# extract the training and test sets from the split object
+train_data <- training(data_split)
+test_data <- testing(data_split)
+y_test <- test_data[,9]
+pcr_model <- pcr(mr_kq5_pq1~., data = train_data,scale =TRUE, validation = "CV")
+pcr_pred <- predict(pcr_model, test_data, ncomp = 3)
+mean((pcr_pred - y_test)^2)
+```
+
+There do not seem to be a few PCs explaining a lot of the variance; performance does not 'level out' but continues to improve with additional PCs
+
+```{r}
+pca_2 <- prcomp( ~ ec_own_ses_college + ec_parent_ses_college + ec_high_own_ses_college + ec_high_parent_ses_college + exposure_own_ses_college + exposure_parent_ses_college + bias_own_ses_college + bias_parent_ses_college + bias_high_own_ses_college + bias_high_parent_ses_college + clustering_college + support_ratio_college + volunteering_rate_college, data=college_pca, center=TRUE, scale.=TRUE)
+
+pca_2
+plot(pca_2)
+summary(pca_2)
+
+
+#bind principal components to OG dataset
+d_pca <- bind_cols(training(d_split), pca_2$x) |> 
+  na.omit()
+
+#plot the first 2 PCs against each other
+ggplot(d_pca, aes(x=PC1, y=PC2)) +
+  geom_point() +
+  labs(title='Plotting first two PCs') +
+  theme_bw()
+
+ggplot(d_pca, aes(x=PC1, y=mr_kq5_pq1)) +
+  geom_point() +
+  labs(title='Plotting Mobility vs first PC') +
+  theme_bw()
+
+ggplot(d_pca, aes(x=PC2, y=mr_kq5_pq1)) +
+  geom_point() +
+  labs(title='Plotting Mobility vs second PC') +
+  theme_bw()
+
+ggplot(d_pca, aes(x=PC3, y=mr_kq5_pq1)) +
+  geom_point() +
+  labs(title='Plotting Mobility vs second PC') +
+  theme_bw()
+
+ggplot(d_pca, aes(x=PC4, y=mr_kq5_pq1)) +
+  geom_point() +
+  labs(title='Plotting Mobility vs second PC') +
+  theme_bw()
+
+
+```
+
+Explore PCA in an OLS?
+
+```{r}
+
+all_vars_pca <- names(d_pca)
+exclude_vars_pca <- c("college_code", "zip", "college", "county", "college_name", "name", "czname", "state", "mr_kq5_pq1", "ktop1pc_cond_parq1", "kq5_cond_parq1", "mr_ktop1_pq1", "trend_parq1", "trend_bottom40", "count", "ec_own_ses_se_college", "ec_parent_ses_se_college", "ec_high_own_ses_se_college", "ec_high_parent_ses_se_college", 'ec_own_ses_college', 'ec_parent_ses_college',  'ec_high_own_ses_college',  'ec_high_parent_ses_college',  'exposure_own_ses_college',  'exposure_parent_ses_college', 'bias_own_ses_college',  'bias_parent_ses_college',  'bias_high_own_ses_college', 'bias_high_parent_ses_college','clustering_college', 'support_ratio_college',  'volunteering_rate_college')
+
+predictor_vars_pca <- all_vars_pca[!(all_vars_pca %in% exclude_vars_pca)]
+
+
+formula_str_pca <- paste0("mr_kq5_pq1 ~ ", paste(predictor_vars_pca, collapse = " + "))
+
+simple_lm_pca <- lm(formula_str_pca, data = d_pca)
+summary(simple_lm_pca)
+
+predictions_pca <- predict(simple_lm_pca, d_pca)
+rmse(d_pca$mr_kq5_pq1, predictions_pca)
+```
+
+Performance does not improve much from our simple OLS, even inclidng all 13 PCs in the model. Therefore, we decide to stick to interpreting our simple OLS coefficients
+
+# Inference: Investigate Relationships with Simple OLS
+
+```{r}
+summary_model <- summary(simple_lm)
+
+# Extract the coefficient estimates
+coef_table <- coef(summary_model)
+
+# View the table of coefficient estimates
+coef_table
+
+
+
+table <- tab_model(simple_lm,
+                   show.est = TRUE, show.se = TRUE)
+
+table
 ```
